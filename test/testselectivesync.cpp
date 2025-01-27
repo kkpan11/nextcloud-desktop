@@ -17,7 +17,13 @@ class TestSelectiveSync : public QObject
     Q_OBJECT
 
 private slots:
+    void initTestCase()
+    {
+        Logger::instance()->setLogFlush(true);
+        Logger::instance()->setLogDebug(true);
 
+        QStandardPaths::setTestModeEnabled(true);
+    }
 
     void testSelectiveSyncBigFolders()
     {
@@ -30,7 +36,7 @@ private slots:
         fakeFolder.setServerOverride([&](QNetworkAccessManager::Operation, const QNetworkRequest &req, QIODevice *device)
                                          -> QNetworkReply * {
             // Record what path we are querying for the size
-            if (req.attribute(QNetworkRequest::CustomVerbAttribute) == "PROPFIND") {
+            if (req.attribute(QNetworkRequest::CustomVerbAttribute).toString() == "PROPFIND") {
                 if (device->readAll().contains("<size "))
                     sizeRequests << req.url().path();
             }
@@ -85,6 +91,38 @@ private slots:
         QCOMPARE(newBigFolder.count(), 0);
         QCOMPARE(sizeRequests.count(), 0);
         QCOMPARE(fakeFolder.currentLocalState(), fakeFolder.currentRemoteState());
+    }
+
+    void testRestoreSubFolderForDataFingerPrint()
+    {
+        const auto mkcolVerb = QByteArray{"MKCOL"};
+        FakeFolder fakeFolder{{}};
+        fakeFolder.localModifier().mkdir("topFolder");
+        fakeFolder.localModifier().mkdir("topFolder/subFolder");
+        fakeFolder.localModifier().insert("topFolder/subFolder/a");
+        fakeFolder.remoteModifier().extraDavProperties = "<oc:data-fingerprint>initial_finger_print</oc:data-fingerprint>";
+
+        QVERIFY(fakeFolder.syncOnce());
+
+        auto mkdirRequestsCounter = 0;
+        fakeFolder.setServerOverride([&mkdirRequestsCounter, mkcolVerb](QNetworkAccessManager::Operation, const QNetworkRequest &req, QIODevice *device)
+                                         -> QNetworkReply * {
+            Q_UNUSED(device)
+
+            if (req.attribute(QNetworkRequest::CustomVerbAttribute) == mkcolVerb) {
+                ++mkdirRequestsCounter;
+            }
+            qDebug() << req.attribute(QNetworkRequest::CustomVerbAttribute);
+
+            return nullptr;
+        });
+
+        fakeFolder.syncEngine().journal()->setSelectiveSyncList(SyncJournalDb::SelectiveSyncBlackList,
+                                                                QStringList() << QLatin1String("topFolder"));
+        fakeFolder.remoteModifier().extraDavProperties = "<oc:data-fingerprint>changed_finger_print</oc:data-fingerprint>";
+
+        QVERIFY(fakeFolder.syncOnce());
+        QCOMPARE(mkdirRequestsCounter, 0);
     }
 };
 

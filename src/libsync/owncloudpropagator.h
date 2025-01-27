@@ -27,12 +27,14 @@
 
 #include "accountfwd.h"
 #include "bandwidthmanager.h"
-#include "common/syncjournaldb.h"
-#include "common/utility.h"
 #include "csync.h"
 #include "progressdispatcher.h"
 #include "syncfileitem.h"
 #include "syncoptions.h"
+
+#include "common/syncjournaldb.h"
+#include "common/utility.h"
+#include "common/vfs.h"
 
 #include <deque>
 
@@ -56,6 +58,7 @@ void blacklistUpdate(SyncJournalDb *journal, SyncFileItem &item);
 class SyncJournalDb;
 class OwncloudPropagator;
 class PropagatorCompositeJob;
+class FolderMetadata;
 
 /**
  * @brief the base class of propagator jobs
@@ -192,6 +195,8 @@ protected slots:
     void slotRestoreJobFinished(SyncFileItem::Status status);
 
 private:
+    void reportClientStatuses();
+
     QScopedPointer<PropagateItemJob> _restoreJob;
     JobParallelism _parallelism = FullParallelism;
 
@@ -241,6 +246,8 @@ public:
     QVector<PropagatorJob *> _runningJobs;
     SyncFileItem::Status _hasError = SyncFileItem::NoStatus; // NoStatus,  or NormalError / SoftError if there was an error
     quint64 _abortsCount = 0;
+    bool _isAnyCaseClashChild = false;
+    bool _isAnyInvalidCharChild = false;
 
     explicit PropagatorCompositeJob(OwncloudPropagator *propagator)
         : PropagatorJob(propagator)
@@ -308,7 +315,7 @@ class OWNCLOUDSYNC_EXPORT PropagateDirectory : public PropagatorJob
 public:
     SyncFileItemPtr _item;
     // e.g: create the directory
-    QScopedPointer<PropagateItemJob> _firstJob;
+    std::unique_ptr<PropagateItemJob> _firstJob;
 
     PropagatorCompositeJob _subJobs;
 
@@ -407,6 +414,17 @@ public:
     void start() override;
 };
 
+class PropagateVfsUpdateMetadataJob : public PropagateItemJob
+{
+    Q_OBJECT
+public:
+    PropagateVfsUpdateMetadataJob(OwncloudPropagator *propagator, const SyncFileItemPtr &item)
+        : PropagateItemJob(propagator, item)
+    {
+    }
+    void start() override;
+};
+
 class PropagateUploadFileCommon;
 
 class OWNCLOUDSYNC_EXPORT OwncloudPropagator : public QObject
@@ -444,6 +462,8 @@ public:
                               QVector<PropagatorJob *> &directoriesToRemove,
                               QString &removedDirectory,
                               QString &maybeConflictDirectory);
+
+    void processE2eeMetadataMigration(const SyncFileItemPtr &item, QStack<QPair<QString, PropagateDirectory *>> &directories);
 
     [[nodiscard]] const SyncOptions &syncOptions() const;
     void setSyncOptions(const SyncOptions &syncOptions);
@@ -519,6 +539,8 @@ public:
     Q_REQUIRED_RESULT QString fullRemotePath(const QString &tmp_file_name) const;
     [[nodiscard]] QString remotePath() const;
 
+    [[nodiscard]] QString fulllRemotePathToPathInSyncJournalDb(const QString &fullRemotePath) const;
+
     /** Creates the job for an item.
      */
     PropagateItemJob *createJob(const SyncFileItemPtr &item);
@@ -592,7 +614,7 @@ public:
      *
      * Will also trigger a Vfs::convertToPlaceholder.
      */
-    Result<Vfs::ConvertToPlaceholderResult, QString> updateMetadata(const SyncFileItem &item);
+    Result<Vfs::ConvertToPlaceholderResult, QString> updateMetadata(const SyncFileItem &item, Vfs::UpdateMetadataTypes updateType = Vfs::AllMetadata);
 
     /** Update the database for an item.
      *
@@ -601,8 +623,11 @@ public:
      *
      * Will also trigger a Vfs::convertToPlaceholder.
      */
-    static Result<Vfs::ConvertToPlaceholderResult, QString> staticUpdateMetadata(const SyncFileItem &item, const QString localDir,
-                                                                                 Vfs *vfs, SyncJournalDb * const journal);
+    static Result<Vfs::ConvertToPlaceholderResult, QString> staticUpdateMetadata(const SyncFileItem &item,
+                                                                                 const QString localDir,
+                                                                                 Vfs *vfs,
+                                                                                 SyncJournalDb * const journal,
+                                                                                 Vfs::UpdateMetadataTypes updateType);
 
     Q_REQUIRED_RESULT bool isDelayedUploadItem(const SyncFileItemPtr &item) const;
 
@@ -633,8 +658,9 @@ private slots:
     /** Emit the finished signal and make sure it is only emitted once */
     void emitFinished(OCC::SyncFileItem::Status status)
     {
-        if (!_finishedEmited)
-            emit finished(status == SyncFileItem::Success);
+        if (!_finishedEmited) {
+            emit finished(status);
+        }
         _abortRequested = false;
         _finishedEmited = true;
     }
@@ -643,9 +669,9 @@ private slots:
 
 signals:
     void newItem(const OCC::SyncFileItemPtr &);
-    void itemCompleted(const SyncFileItemPtr &item, OCC::ErrorCategory category);
+    void itemCompleted(const OCC::SyncFileItemPtr &item, OCC::ErrorCategory category);
     void progress(const OCC::SyncFileItem &, qint64 bytes);
-    void finished(bool success);
+    void finished(OCC::SyncFileItem::Status status);
 
     /** Emitted when propagation has problems with a locked file. */
     void seenLockedFile(const QString &fileName);
@@ -724,7 +750,7 @@ public:
     void start();
 signals:
     void finished();
-    void aborted(const QString &error, const ErrorCategory errorCategory);
+    void aborted(const QString &error, const OCC::ErrorCategory errorCategory);
 private slots:
     void slotPollFinished();
 };

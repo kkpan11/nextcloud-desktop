@@ -56,6 +56,8 @@ OCSYNC_EXPORT QByteArray parseChecksumHeaderType(const QByteArray &header);
 /// Checks OWNCLOUD_DISABLE_CHECKSUM_UPLOAD
 OCSYNC_EXPORT bool uploadChecksumEnabled();
 
+OCSYNC_EXPORT QByteArray calcSha256(const QByteArray &data);
+
 /**
  * Computes the checksum of a file.
  * \ingroup libsync
@@ -82,19 +84,9 @@ public:
     void start(const QString &filePath);
 
     /**
-     * Computes the checksum for the given device.
-     *
-     * done() is emitted when the calculation finishes.
-     *
-     * The device ownership transfers into the thread that
-     * will compute the checksum. It must not have a parent.
-     */
-    void start(QSharedPointer<QIODevice> device);
-
-    /**
      * Computes the checksum synchronously.
      */
-    static QByteArray computeNow(QSharedPointer<QIODevice> device, const QByteArray &checksumType);
+    static QByteArray computeNow(const QString &filePath, const QByteArray &checksumType);
 
     /**
      * Computes the checksum synchronously on file. Convenience wrapper for computeNow().
@@ -108,7 +100,7 @@ private slots:
     void slotCalculationDone();
 
 private:
-    void startImpl(QSharedPointer<QIODevice> device);
+    void startImpl(const QString &filePath);
 
     QByteArray _checksumType;
 
@@ -144,16 +136,6 @@ public:
      * be emitted.
      */
     void start(const QString &filePath, const QByteArray &checksumHeader);
-
-    /**
-     * Check a device's actual checksum against the provided checksumHeader
-     *
-     * Like the other start() but works on an device.
-     *
-     * The device ownership transfers into the thread that
-     * will compute the checksum. It must not have a parent.
-     */
-    void start(QSharedPointer<QIODevice> device, const QByteArray &checksumHeader);
 
     [[nodiscard]] QByteArray calculatedChecksumType() const;
     [[nodiscard]] QByteArray calculatedChecksum() const;

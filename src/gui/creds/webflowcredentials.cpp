@@ -2,6 +2,15 @@
 
 #include "creds/httpcredentials.h"
 #include "creds/keychainchunk.h"
+#include "accessmanager.h"
+#include "account.h"
+#include "configfile.h"
+#include "theme.h"
+#ifdef WITH_WEBENGINE
+#include "wizard/webview.h"
+#endif // WITH_WEBENGINE
+#include "webflowcredentialsdialog.h"
+#include "networkjobs.h"
 
 #include <QAuthenticator>
 #include <QNetworkAccessManager>
@@ -11,15 +20,6 @@
 #include <QDialog>
 #include <QVBoxLayout>
 #include <QLabel>
-
-#include "accessmanager.h"
-#include "account.h"
-#include "configfile.h"
-#include "theme.h"
-#ifdef WITH_WEBENGINE
-#include "wizard/webview.h"
-#endif // WITH_WEBENGINE
-#include "webflowcredentialsdialog.h"
 
 using namespace QKeychain;
 
@@ -190,7 +190,6 @@ void WebFlowCredentials::slotAskFromUserCredentialsProvided(const QString &user,
     emit asked();
 
     _askDialog->close();
-    _askDialog->deleteLater();
     _askDialog = nullptr;
 }
 
@@ -214,6 +213,7 @@ bool WebFlowCredentials::stillValid(QNetworkReply *reply) {
 void WebFlowCredentials::persist() {
     if (_user.isEmpty()) {
         // We don't even have a user nothing to see here move along
+        qCWarning(lcWebFlowCredentials) << "_user is unset, nothing to persist ...";
         return;
     }
 
@@ -356,7 +356,7 @@ void WebFlowCredentials::forgetSensitiveData() {
 
     _account->deleteAppPassword();
 
-    const QString kck = keychainKey(_account->url().toString(), _user, _account->id());
+    const auto kck = keychainKey(_account->url().toString(), _user, _account->id());
     if (kck.isEmpty()) {
         qCDebug(lcWebFlowCredentials()) << "InvalidateToken: User is empty, bailing out!";
         return;

@@ -24,7 +24,9 @@ public:
                          const QString &path,
                          const QString &remoteSyncPathWithTrailingSlash,
                          const QString &localSyncPath,
+                         const QString &etag,
                          const SyncFileItem::LockStatus requestedLockState,
+                         const SyncFileItem::LockOwnerType lockOwnerType,
                          QObject *parent = nullptr);
     void start() override;
 
@@ -48,6 +50,7 @@ private:
 
     SyncJournalDb* _journal = nullptr;
     SyncFileItem::LockStatus _requestedLockState = SyncFileItem::LockStatus::LockedItem;
+    SyncFileItem::LockOwnerType _requestedLockOwnerType = SyncFileItem::LockOwnerType::UserLock;
 
     SyncFileItem::LockStatus _lockStatus = SyncFileItem::LockStatus::UnlockedItem;
     SyncFileItem::LockOwnerType _lockOwnerType = SyncFileItem::LockOwnerType::UserLock;
@@ -57,8 +60,10 @@ private:
     QByteArray _etag;
     qint64 _lockTime = 0;
     qint64 _lockTimeout = 0;
+    QString _lockToken;
     QString _remoteSyncPathWithTrailingSlash;
     QString _localSyncPath;
+    QString _existingEtag;
 };
 
 }
