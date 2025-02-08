@@ -50,7 +50,7 @@ QUrl PropagateUploadFileNG::chunkUrl(const int chunk) const
     constexpr auto maxChunkDigits = 5; // Chunk V2: max num of chunks is 10000
 
     // We need to do add leading 0 because the server orders the chunk alphabetically
-    const auto chunkNumString = QString("%1").arg(chunk, maxChunkDigits, 10, QChar('0'));
+    const auto chunkNumString = QStringLiteral("%1").arg(chunk, maxChunkDigits, 10, QChar('0'));
     return Utility::concatUrlPath(chunkUploadFolderUrl(), chunkNumString);
 }
 
@@ -85,6 +85,14 @@ QUrl PropagateUploadFileNG::chunkUrl(const int chunk) const
 
  */
 
+QByteArray PropagateUploadFileNG::destinationHeader() const
+{
+    const auto davUrl = Utility::trailingSlashPath(propagator()->account()->davUrl().toString());
+    const auto remotePath = Utility::noLeadingSlashPath(propagator()->fullRemotePath(_fileToUpload._file));
+    const auto destination = QString(davUrl + remotePath);
+    return destination.toUtf8();
+}
+
 void PropagateUploadFileNG::doStartUpload()
 {
     propagator()->_activeJobList.append(this);
@@ -97,7 +105,7 @@ void PropagateUploadFileNG::doStartUpload()
     if (progressInfo._valid && progressInfo.isChunked() && progressInfo._modtime == _item->_modtime && progressInfo._size == _item->_size) {
         _transferId = progressInfo._transferid;
 
-        const auto job = new LsColJob(propagator()->account(), chunkUploadFolderUrl(), this);
+        const auto job = new LsColJob(propagator()->account(), chunkUploadFolderUrl());
         _jobs.append(job);
         job->setProperties(QList<QByteArray>() << "resourcetype"
                                                << "getcontentlength");
@@ -177,7 +185,7 @@ void PropagateUploadFileNG::slotPropfindFinished()
         // Make sure that if there is a "hole" and then a few more chunks, on the server
         // we should remove the later chunks. Otherwise when we do dynamic chunk sizing, we may end up
         // with corruptions if there are too many chunks, or if we abort and there are still stale chunks.
-        for (const auto &serverChunk : qAsConst(_serverChunks)) {
+        for (const auto &serverChunk : std::as_const(_serverChunks)) {
             auto job = new DeleteJob(propagator()->account(), Utility::concatUrlPath(chunkUploadFolderUrl(), serverChunk.originalName), this);
             QObject::connect(job, &DeleteJob::finishedSignal, this, &PropagateUploadFileNG::slotDeleteJobFinished);
             _jobs.append(job);
@@ -268,6 +276,7 @@ void PropagateUploadFileNG::startNewUpload()
 
     // But we should send the temporary (or something) one.
     headers["OC-Total-Length"] = QByteArray::number(_fileToUpload._size);
+    headers["Destination"] = destinationHeader();
     const auto job = new MkColJob(propagator()->account(), chunkUploadFolderUrl(), headers, this);
 
     connect(job, &MkColJob::finishedWithError,
@@ -319,6 +328,10 @@ void PropagateUploadFileNG::finishUpload()
 
     const auto fileSize = _fileToUpload._size;
     headers[QByteArrayLiteral("OC-Total-Length")] = QByteArray::number(fileSize);
+    if (_item->_lockOwnerType == SyncFileItem::LockOwnerType::TokenLock &&
+        _item->_locked == SyncFileItem::LockStatus::LockedItem) {
+        headers[QByteArrayLiteral("If")] = (QLatin1String("<") + propagator()->account()->davUrl().toString() + _fileToUpload._file + "> (<opaquelocktoken:" + _item->_lockToken.toUtf8() + ">)").toUtf8();
+    }
 
     const auto job = new MoveJob(propagator()->account(), Utility::concatUrlPath(chunkUploadFolderUrl(), "/.file"), destination, headers, this);
     _jobs.append(job);
@@ -362,9 +375,7 @@ void PropagateUploadFileNG::startNextChunk()
 
     QMap<QByteArray, QByteArray> headers;
     headers["OC-Chunk-Offset"] = QByteArray::number(_sent);
-
-    const auto destination = QDir::cleanPath(propagator()->account()->davUrl().path() + propagator()->fullRemotePath(_fileToUpload._file));
-    headers["Destination"] = QUrl::toPercentEncoding(destination);
+    headers["Destination"] = destinationHeader();
 
     _sent += _currentChunkSize;
     const auto url = chunkUrl(_currentChunk);
@@ -404,6 +415,9 @@ void PropagateUploadFileNG::slotPutFinished()
         _item->_httpErrorCode = job->reply()->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
         _item->_requestId = job->requestId();
         commonErrorHandling(job);
+        const auto exceptionParsed = getExceptionFromReply(job->reply());
+        _item->_errorExceptionName = exceptionParsed.first;
+        _item->_errorExceptionMessage = exceptionParsed.second;
         return;
     }
 
@@ -489,6 +503,9 @@ void PropagateUploadFileNG::slotMoveJobFinished()
 
     if (err != QNetworkReply::NoError) {
         commonErrorHandling(job);
+        const auto exceptionParsed = getExceptionFromReply(job->reply());
+        _item->_errorExceptionName = exceptionParsed.first;
+        _item->_errorExceptionMessage = exceptionParsed.second;
         return;
     }
 
@@ -521,8 +538,14 @@ void PropagateUploadFileNG::slotMoveJobFinished()
         _item->_fileId = fid;
     }
 
+    if (SyncJournalFileRecord oldRecord; propagator()->_journal->getFileRecord(_item->destination(), &oldRecord) && oldRecord.isValid()) {
+        if (oldRecord._etag != _item->_etag) {
+            _item->updateLockStateFromDbRecord(oldRecord);
+        }
+    }
+
     _item->_etag = getEtagFromReply(job->reply());
-    ;
+
     if (_item->_etag.isEmpty()) {
         qCWarning(lcPropagateUploadNG) << "Server did not return an ETAG" << _item->_file;
         abortWithError(SyncFileItem::NormalError, tr("Missing ETag from server"));

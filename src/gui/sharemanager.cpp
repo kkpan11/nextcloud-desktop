@@ -17,6 +17,8 @@
 #include "account.h"
 #include "folderman.h"
 #include "accountstate.h"
+#include "clientsideencryption.h"
+#include "updatee2eefolderusersmetadatajob.h"
 
 #include <QUrl>
 #include <QJsonDocument>
@@ -30,7 +32,7 @@ namespace OCC {
 /**
  * When a share is modified, we need to tell the folders so they can adjust overlay icons
  */
-static void updateFolder(const AccountPtr &account, const QString &path)
+static void updateFolder(const AccountPtr &account, QStringView path)
 {
     foreach (Folder *f, FolderMan::instance()->map()) {
         if (f->accountState()->account() != account)
@@ -39,7 +41,7 @@ static void updateFolder(const AccountPtr &account, const QString &path)
         if (path.startsWith(folderPath) && (path == folderPath || folderPath.endsWith('/') || path[folderPath.size()] == '/')) {
             // Workaround the fact that the server does not invalidate the etags of parent directories
             // when something is shared.
-            auto relative = path.midRef(f->remotePathTrailingSlash().length());
+            auto relative = path.mid(f->remotePathTrailingSlash().length());
             f->journalDb()->schedulePathForRemoteDiscovery(relative.toString());
 
             // Schedule a sync so it can update the remote permission flag and let the socket API
@@ -486,6 +488,40 @@ void ShareManager::createShare(const QString &path,
     job->getSharedWithMe();
 }
 
+void ShareManager::createE2EeShareJob(const QString &fullRemotePath,
+                                      const ShareePtr sharee,
+                                      const Share::Permissions permissions,
+                                      const QString &password)
+{
+    Folder *folder = nullptr;
+    for (const auto &f : FolderMan::instance()->map()) {
+        if (f->accountState()->account() != _account) {
+            continue;
+        }
+        folder = f;
+    }
+
+    if (!folder) {
+        emit serverError(0, "Failed creating share");
+        return;
+    }
+
+    Q_ASSERT(folder->remotePath() == QStringLiteral("/") ||
+        Utility::noLeadingSlashPath(fullRemotePath).startsWith(Utility::noLeadingSlashPath(Utility::noTrailingSlashPath(folder->remotePath()))));
+
+    const auto createE2eeShareJob = new UpdateE2eeFolderUsersMetadataJob(_account,
+                                                                         folder->journalDb(),
+                                                                         folder->remotePath(),
+                                                                         UpdateE2eeFolderUsersMetadataJob::Add,
+                                                                         fullRemotePath,
+                                                                         sharee->shareWith(),
+                                                                         QSslCertificate{},
+                                                                         this);
+
+    createE2eeShareJob->setUserData({sharee, permissions, password});
+    connect(createE2eeShareJob, &UpdateE2eeFolderUsersMetadataJob::finished, this, &ShareManager::slotCreateE2eeShareJobFinised);
+    createE2eeShareJob->start();
+}
 
 void ShareManager::slotShareCreated(const QJsonDocument &reply)
 {
@@ -500,13 +536,21 @@ void ShareManager::slotShareCreated(const QJsonDocument &reply)
 
 void ShareManager::fetchShares(const QString &path)
 {
-    auto *job = new OcsShareJob(_account);
+    const auto job = new OcsShareJob(_account);
     connect(job, &OcsShareJob::shareJobFinished, this, &ShareManager::slotSharesFetched);
     connect(job, &OcsJob::ocsError, this, &ShareManager::slotOcsError);
     job->getShares(path);
 }
 
-void ShareManager::slotSharesFetched(const QJsonDocument &reply)
+void ShareManager::fetchSharedWithMe(const QString &path)
+{
+    const auto sharedWithMeJob = new OcsShareJob(_account);
+    connect(sharedWithMeJob, &OcsShareJob::shareJobFinished, this, &ShareManager::slotSharedWithMeFetched);
+    connect(sharedWithMeJob, &OcsJob::ocsError, this, &ShareManager::slotOcsError);
+    sharedWithMeJob->getSharedWithMe(path);
+}
+
+const QList<SharePtr> ShareManager::parseShares(const QJsonDocument &reply) const
 {
     qDebug() << reply;
     auto tmpShares = reply.object().value("ocs").toObject().value("data").toArray();
@@ -534,10 +578,22 @@ void ShareManager::slotSharesFetched(const QJsonDocument &reply)
     }
 
     qCDebug(lcSharing) << "Sending " << shares.count() << "shares";
+    return shares;
+}
+
+void ShareManager::slotSharesFetched(const QJsonDocument &reply)
+{
+    const auto shares = parseShares(reply);
     emit sharesFetched(shares);
 }
 
-QSharedPointer<UserGroupShare> ShareManager::parseUserGroupShare(const QJsonObject &data)
+void ShareManager::slotSharedWithMeFetched(const QJsonDocument &reply)
+{
+    const auto shares = parseShares(reply);
+    emit sharedWithMeFetched(shares);
+}
+
+QSharedPointer<UserGroupShare> ShareManager::parseUserGroupShare(const QJsonObject &data) const
 {
     ShareePtr sharee(new Sharee(data.value("share_with").toString(),
         data.value("share_with_displayname").toString(),
@@ -566,7 +622,7 @@ QSharedPointer<UserGroupShare> ShareManager::parseUserGroupShare(const QJsonObje
         note));
 }
 
-QSharedPointer<LinkShare> ShareManager::parseLinkShare(const QJsonObject &data)
+QSharedPointer<LinkShare> ShareManager::parseLinkShare(const QJsonObject &data) const
 {
     QUrl url;
 
@@ -629,5 +685,29 @@ SharePtr ShareManager::parseShare(const QJsonObject &data) const
 void ShareManager::slotOcsError(int statusCode, const QString &message)
 {
     emit serverError(statusCode, message);
+}
+
+
+void ShareManager::slotCreateE2eeShareJobFinised(int statusCode, const QString &message)
+{
+    const auto job = qobject_cast<UpdateE2eeFolderUsersMetadataJob *>(sender());
+    Q_ASSERT(job);
+    if (!job) {
+        qCWarning(lcUserGroupShare) << "slotCreateE2eeShareJobFinised must be called by UpdateE2eeShareMetadataJob::finished signal!";
+        return;
+    }
+    disconnect(job, &UpdateE2eeFolderUsersMetadataJob::finished, this, &ShareManager::slotCreateE2eeShareJobFinised);
+    const auto userData = job->userData();
+    Q_ASSERT(userData.sharee);
+    if (!userData.sharee) {
+        qCWarning(lcUserGroupShare) << "missing userData Map in UpdateE2eeShareMetadataJob instance!";
+        emit serverError(-1, tr("Error"));
+        return;
+    }
+    if (statusCode != 200) {
+        emit serverError(statusCode, message);
+    } else {
+        createShare(job->path(), Share::ShareType(userData.sharee->type()), userData.sharee->shareWith(), userData.desiredPermissions, userData.password);
+    }
 }
 }

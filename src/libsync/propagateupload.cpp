@@ -112,6 +112,9 @@ bool PollJob::finished()
         _item->_requestId = requestId();
         _item->_status = classifyError(err, _item->_httpErrorCode);
         _item->_errorString = errorString();
+        const auto exceptionParsed = getExceptionFromReply(reply());
+        _item->_errorExceptionName = exceptionParsed.first;
+        _item->_errorExceptionMessage = exceptionParsed.second;
 
         if (_item->_status == SyncFileItem::FatalError || _item->_httpErrorCode >= 400) {
             if (_item->_status != SyncFileItem::FatalError
@@ -152,6 +155,13 @@ bool PollJob::finished()
     if (status == QLatin1String("finished")) {
         _item->_status = SyncFileItem::Success;
         _item->_fileId = json["fileId"].toString().toUtf8();
+
+        if (SyncJournalFileRecord oldRecord; _journal->getFileRecord(_item->destination(), &oldRecord) && oldRecord.isValid()) {
+            if (oldRecord._etag != _item->_etag) {
+                _item->updateLockStateFromDbRecord(oldRecord);
+            }
+        }
+
         _item->_etag = parseEtag(json["ETag"].toString().toUtf8());
     } else { // error
         _item->_status = classifyError(QNetworkReply::UnknownContentError, _item->_httpErrorCode);
@@ -428,8 +438,8 @@ void PropagateUploadFileCommon::slotStartUpload(const QByteArray &transmissionCh
 
 void PropagateUploadFileCommon::slotFolderUnlocked(const QByteArray &folderId, int httpReturnCode)
 {
-    qDebug() << "Failed to unlock encrypted folder" << folderId;
     if (_uploadStatus.status == SyncFileItem::NoStatus && httpReturnCode != 200) {
+        qDebug() << "Failed to unlock encrypted folder" << folderId;
         done(SyncFileItem::FatalError, tr("Failed to unlock encrypted folder."));
     } else {
         done(_uploadStatus.status, _uploadStatus.message);
@@ -522,7 +532,10 @@ qint64 UploadDevice::readData(char *data, qint64 maxlen)
     }
 
     auto c = _file.read(data, maxlen);
-    if (c < 0) {
+    if (c == 0) {
+        setErrorString({});
+        return c;
+    } else if (c < 0) {
         setErrorString(_file.errorString());
         return -1;
     }
@@ -709,13 +722,14 @@ void PropagateUploadFileCommon::commonErrorHandling(AbstractNetworkJob *job)
 void PropagateUploadFileCommon::adjustLastJobTimeout(AbstractNetworkJob *job, qint64 fileSize)
 {
     constexpr double threeMinutes = 3.0 * 60 * 1000;
+    constexpr qint64 thirtyMinutes = 30 * 60 * 1000;
 
     job->setTimeout(qBound(
-        job->timeoutMsec(),
         // Calculate 3 minutes for each gigabyte of data
-        qRound64(threeMinutes * fileSize / 1e9),
+        qMin(thirtyMinutes - 1, qRound64(threeMinutes * fileSize / 1e9)),
+        job->timeoutMsec(),
         // Maximum of 30 minutes
-        static_cast<qint64>(30 * 60 * 1000)));
+        thirtyMinutes));
 }
 
 void PropagateUploadFileCommon::slotJobDestroyed(QObject *job)
@@ -792,8 +806,12 @@ void PropagateUploadFileCommon::finalize()
     if (quotaIt != propagator()->_folderQuota.end())
         quotaIt.value() -= _fileToUpload._size;
 
+    if (_item->isEncrypted() && _uploadingEncrypted) {
+        _item->_e2eCertificateFingerprint = propagator()->account()->encryptionCertificateFingerprint();
+    }
+
     // Update the database entry
-    const auto result = propagator()->updateMetadata(*_item);
+    const auto result = propagator()->updateMetadata(*_item, Vfs::DatabaseMetadata);
     if (!result) {
         done(SyncFileItem::FatalError, tr("Error updating metadata: %1").arg(result.error()));
         return;

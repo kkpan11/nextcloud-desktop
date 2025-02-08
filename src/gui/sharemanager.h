@@ -67,6 +67,8 @@ public:
 
     using Permissions = SharePermissions;
 
+    Q_ENUM(Permissions);
+
     /*
      * Constructor for shares
      */
@@ -310,7 +312,6 @@ signals:
     void noteSet();
     void nameSet();
     void labelSet();
-    void hideDownloadSet();
 
 private slots:
     void slotNoteSet(const QJsonDocument &, const QVariant &value);
@@ -412,6 +413,23 @@ public:
         const Share::Permissions permissions,
         const QString &password = "");
 
+        /**
+     * Tell the manager to create and start new UpdateE2eeShareMetadataJob job
+     *
+     * @param fullRemotePath The path of the share relative to the user folder on the server
+     * @param shareType The type of share (TypeUser, TypeGroup, TypeRemote)
+     * @param Permissions The share permissions
+     * @param folderId The id for an E2EE folder
+     * @param password An optional password for a share
+     *
+     * On success the signal shareCreated is emitted
+     * In case of a server error the serverError signal is emitted
+     */
+    void createE2EeShareJob(const QString &fullRemotePath,
+                            const ShareePtr sharee,
+                            const Share::Permissions permissions,
+                            const QString &password = "");
+
     /**
      * Fetch all the shares for path
      *
@@ -422,10 +440,21 @@ public:
      */
     void fetchShares(const QString &path);
 
+    /**
+     * Fetch shares with the current user for path
+     *
+     * @param path The path to get the shares for relative to the users folder on the server
+     *
+     * On success the sharedWithMeFetched signal is emitted
+     * In case of a server error the serverError signal is emitted
+     */
+    void fetchSharedWithMe(const QString &path);
+
 signals:
     void shareCreated(const OCC::SharePtr &share);
     void linkShareCreated(const QSharedPointer<OCC::LinkShare> &share);
     void sharesFetched(const QList<OCC::SharePtr> &shares);
+    void sharedWithMeFetched(const QList<OCC::SharePtr> &shares);
     void serverError(int code, const QString &message);
 
     /** Emitted when creating a link share with password fails.
@@ -438,13 +467,17 @@ signals:
 
 private slots:
     void slotSharesFetched(const QJsonDocument &reply);
+    void slotSharedWithMeFetched(const QJsonDocument &reply);
     void slotLinkShareCreated(const QJsonDocument &reply);
     void slotShareCreated(const QJsonDocument &reply);
     void slotOcsError(int statusCode, const QString &message);
+    void slotCreateE2eeShareJobFinised(int statusCode, const QString &message);
+
 private:
-    QSharedPointer<LinkShare> parseLinkShare(const QJsonObject &data);
-    QSharedPointer<UserGroupShare> parseUserGroupShare(const QJsonObject &data);
+    QSharedPointer<LinkShare> parseLinkShare(const QJsonObject &data) const;
+    QSharedPointer<UserGroupShare> parseUserGroupShare(const QJsonObject &data) const;
     SharePtr parseShare(const QJsonObject &data) const;
+    const QList<OCC::SharePtr> parseShares(const QJsonDocument &reply) const;
 
     AccountPtr _account;
 };

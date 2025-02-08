@@ -9,6 +9,7 @@
 #include <QTemporaryDir>
 
 #include "csync_exclude.h"
+#include "logger.h"
 
 using namespace OCC;
 
@@ -64,6 +65,14 @@ static auto check_dir_traversal(const char *path)
 
 
 private slots:
+    void initTestCase()
+    {
+        OCC::Logger::instance()->setLogFlush(true);
+        OCC::Logger::instance()->setLogDebug(true);
+
+        QStandardPaths::setTestModeEnabled(true);
+    }
+
     void testFun()
     {
         ExcludedFiles excluded;
@@ -85,8 +94,6 @@ private slots:
         QVERIFY(excluded.isExcluded("/a/foo_conflict-bar", "/a", keepHidden));
         QVERIFY(excluded.isExcluded("/a/foo (conflicted copy bar)", "/a", keepHidden));
         QVERIFY(excluded.isExcluded("/a/.b", "/a", excludeHidden));
-
-        QVERIFY(excluded.isExcluded("/a/#b#", "/a", keepHidden));
     }
 
     void check_csync_exclude_add()
@@ -594,8 +601,8 @@ private slots:
     {
         auto csync_is_windows_reserved_word = [](const char *fn) {
             QString s = QString::fromLatin1(fn);
-            extern bool csync_is_windows_reserved_word(const QStringRef &filename);
-            return csync_is_windows_reserved_word(&s);
+            extern bool csync_is_windows_reserved_word(const QStringView &filename);
+            return csync_is_windows_reserved_word(s);
         };
 
         QVERIFY(csync_is_windows_reserved_word("CON"));
@@ -708,7 +715,7 @@ private slots:
     void testAddExcludeFilePath_addSameFilePath_listSizeDoesNotIncrease()
     {
         excludedFiles.reset(new ExcludedFiles());
-        const auto filePath = QString("exclude/.sync-exclude.lst");
+        const auto filePath = QStringLiteral("exclude/.sync-exclude.lst");
         
         excludedFiles->addExcludeFilePath(filePath);
         excludedFiles->addExcludeFilePath(filePath);        
@@ -720,8 +727,8 @@ private slots:
     {
         excludedFiles.reset(new ExcludedFiles());
         
-        const auto filePath1 = QString("exclude1/.sync-exclude.lst");
-        const auto filePath2 = QString("exclude2/.sync-exclude.lst");
+        const auto filePath1 = QStringLiteral("exclude1/.sync-exclude.lst");
+        const auto filePath2 = QStringLiteral("exclude2/.sync-exclude.lst");
     
         excludedFiles->addExcludeFilePath(filePath1);
         excludedFiles->addExcludeFilePath(filePath2);

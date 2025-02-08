@@ -16,6 +16,7 @@
 #ifndef FOLDERMAN_H
 #define FOLDERMAN_H
 
+#include <QByteArray>
 #include <QObject>
 #include <QQueue>
 #include <QList>
@@ -38,6 +39,7 @@ class Application;
 class SyncResult;
 class SocketApi;
 class LockWatcher;
+class UpdateE2eeFolderUsersMetadataJob;
 
 /**
  * @brief The FolderMan class
@@ -99,7 +101,7 @@ public:
     Folder *addFolder(AccountState *accountState, const FolderDefinition &folderDefinition);
 
     /** Removes a folder */
-    void removeFolder(Folder *);
+    void removeFolder(Folder *folderToRemove);
 
     /** Returns the folder which the file or directory stored in path is in */
     Folder *folderForPath(const QString &path);
@@ -122,7 +124,7 @@ public:
      * Migrate accounts from owncloud
      * Creates a folder for a specific configuration, identified by alias.
      */
-    void setupFolderFromOldConfigFile(const QString &, AccountState *account);
+    void setupLegacyFolder(const QString &, AccountState *account);
 
     /**
      * Ensures that a given directory does not contain a sync journal file.
@@ -135,11 +137,10 @@ public:
     bool startFromScratch(const QString &);
 
     /// Produce text for use in the tray tooltip
-    static QString trayTooltipStatusString(SyncResult::Status syncStatus, bool hasUnresolvedConflicts, bool paused);
+    static QString trayTooltipStatusString(SyncResult::Status syncStatus, bool hasUnresolvedConflicts, bool paused, ProgressInfo *progress);
 
     /// Compute status summarizing multiple folders
-    static void trayOverallStatus(const QList<Folder *> &folders,
-        SyncResult::Status *status, bool *unresolvedConflicts);
+    static void trayOverallStatus(const QList<Folder *> &folders, SyncResult::Status *status, bool *unresolvedConflicts, ProgressInfo **overallProgressInfo);
 
     // Escaping of the alias which is used in QSettings AND the file
     // system, thus need to be escaped.
@@ -225,10 +226,16 @@ public:
 
     void setDirtyProxy();
     void setDirtyNetworkLimits();
+    void setDirtyNetworkLimits(const AccountPtr &account) const;
 
     /** removes current user from the share **/
     void leaveShare(const QString &localFile);
 
+    /** Whether or not vfs is supported in the location. */
+    [[nodiscard]] bool checkVfsAvailability(const QString &path, Vfs::Mode mode = bestAvailableVfsMode()) const;
+
+    /** If the folder configuration is no longer supported this will return an error string */
+    [[nodiscard]] Result<void, QString> unsupportedConfiguration(const QString &path) const;
 signals:
     /**
       * signal to indicate a folder has changed its sync state.
@@ -326,6 +333,8 @@ private slots:
     void slotProcessFilesPushNotification(OCC::Account *account);
     void slotConnectToPushNotifications(OCC::Account *account);
 
+    void slotLeaveShare(const QString &localFile, const QByteArray &folderToken = {});
+
 private:
     /** Adds a new folder, does not add it to the account settings and
      *  does not set an account on the new folder.
@@ -391,6 +400,8 @@ private:
 
     QScopedPointer<SocketApi> _socketApi;
     NavigationPaneHelper _navigationPaneHelper;
+
+    QPointer<UpdateE2eeFolderUsersMetadataJob> _removeE2eeShareJob;
 
     bool _appRestartRequired = false;
 

@@ -102,6 +102,11 @@ void PropagateUploadFileV1::startNextChunk()
 
     QString path = _fileToUpload._file;
 
+    if (_item->_lockOwnerType == SyncFileItem::LockOwnerType::TokenLock &&
+        _item->_locked == SyncFileItem::LockStatus::LockedItem) {
+        headers[QByteArrayLiteral("If")] = (QLatin1String("<") + propagator()->account()->davUrl().toString() + _fileToUpload._file + "> (<opaquelocktoken:" + _item->_lockToken.toUtf8() + ">)").toUtf8();
+    }
+
     qint64 chunkStart = 0;
     qint64 currentChunkSize = fileSize;
     bool isFinalChunk = false;
@@ -110,7 +115,7 @@ void PropagateUploadFileV1::startNextChunk()
         // XOR with chunk size to make sure everything goes well if chunk size changes between runs
         uint transid = _transferId ^ uint(chunkSize());
         qCInfo(lcPropagateUploadV1) << "Upload chunk" << sendingChunk << "of" << _chunkCount << "transferid(remote)=" << transid;
-        path += QString("-chunking-%1-%2-%3").arg(transid).arg(_chunkCount).arg(sendingChunk);
+        path += QStringLiteral("-chunking-%1-%2-%3").arg(transid).arg(_chunkCount).arg(sendingChunk);
 
         headers[QByteArrayLiteral("OC-Chunked")] = QByteArrayLiteral("1");
 
@@ -218,6 +223,9 @@ void PropagateUploadFileV1::slotPutFinished()
     QNetworkReply::NetworkError err = job->reply()->error();
     if (err != QNetworkReply::NoError) {
         commonErrorHandling(job);
+        const auto exceptionParsed = getExceptionFromReply(job->reply());
+        _item->_errorExceptionName = exceptionParsed.first;
+        _item->_errorExceptionMessage = exceptionParsed.second;
         return;
     }
 
@@ -321,6 +329,12 @@ void PropagateUploadFileV1::slotPutFinished()
             qCWarning(lcPropagateUploadV1) << "File ID changed!" << _item->_fileId << fid;
         }
         _item->_fileId = fid;
+    }
+
+    if (SyncJournalFileRecord oldRecord; propagator()->_journal->getFileRecord(_item->destination(), &oldRecord) && oldRecord.isValid()) {
+        if (oldRecord._etag != _item->_etag) {
+            _item->updateLockStateFromDbRecord(oldRecord);
+        }
     }
 
     _item->_etag = etag;

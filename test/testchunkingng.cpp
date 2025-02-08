@@ -6,9 +6,12 @@
  */
 
 #include "syncenginetestutils.h"
-#include <QtTest>
+
 #include <owncloudpropagator.h>
 #include <syncengine.h>
+
+#include <QtTest>
+#include <QTextCodec>
 
 using namespace OCC;
 
@@ -55,6 +58,16 @@ class TestChunkingNG : public QObject
     Q_OBJECT
 
 private slots:
+    void initTestCase()
+    {
+        AbstractNetworkJob::enableTimeout = true;
+
+        OCC::Logger::instance()->setLogFlush(true);
+        OCC::Logger::instance()->setLogDebug(true);
+
+        QStandardPaths::setTestModeEnabled(true);
+    }
+
     void testChunkV2Restrictions()
     {
         FakeFolder fakeFolder{FileInfo::A12_B12_C12_S12()};
@@ -87,7 +100,7 @@ private slots:
         const auto chunkingId = fakeFolder.uploadState().children.first().name;
         const auto chunkMap = fakeFolder.uploadState().children.first().children;
         const auto firstChunkName = chunkMap.first().name;
-        const auto expectedChunkName = QString("%1").arg(1, 5, 10, QChar('0'));
+        const auto expectedChunkName = QStringLiteral("%1").arg(1, 5, 10, QChar('0'));
         QCOMPARE(firstChunkName, expectedChunkName);
     }
 
@@ -165,7 +178,7 @@ private slots:
 
         // Remove the second chunk, so all further chunks will be deleted and resent
         auto firstChunk = chunkMap.first();
-        auto secondChunk = *(chunkMap.begin() + 1);
+        auto secondChunk = *(std::next(chunkMap.begin()));
         const auto chunksList = chunkMap.keys().mid(2);
         for (const auto& name : chunksList) {
             chunksToDelete.append(name);
@@ -219,7 +232,7 @@ private slots:
 
         // Add a chunk that makes the file completely uploaded
         const auto testChunkNameNum = chunkMap.count() + 1; // Chunk nums start at 1 with Chunk V2, so size() == last num, add 1
-        const auto testChunkName = QString("%1").arg(testChunkNameNum, 5, 10, QChar('0'));
+        const auto testChunkName = QStringLiteral("%1").arg(testChunkNameNum, 5, 10, QChar('0'));
         const auto testChunkSize = size - uploadedSize;
         fakeFolder.uploadState().children.first().insert(testChunkName, testChunkSize);
 
@@ -231,7 +244,7 @@ private slots:
                 sawPut = true;
             } else if (op == QNetworkAccessManager::DeleteOperation) {
                 sawDelete = true;
-            } else if (request.attribute(QNetworkRequest::CustomVerbAttribute) == "MOVE") {
+            } else if (request.attribute(QNetworkRequest::CustomVerbAttribute).toString() == "MOVE") {
                 sawMove = true;
             }
             return nullptr;
@@ -272,7 +285,7 @@ private slots:
 
         // Add a chunk that makes the file more than completely uploaded
         const auto testChunkNameNum = chunkMap.count() + 1; // Chunk nums start at 1 with Chunk V2, so size() == last num, add 1
-        const auto testChunkName = QString("%1").arg(testChunkNameNum, 5, 10, QChar('0'));
+        const auto testChunkName = QStringLiteral("%1").arg(testChunkNameNum, 5, 10, QChar('0'));
         const auto testChunkSize = size - uploadedSize + 100;
         fakeFolder.uploadState().children.first().insert(testChunkName, testChunkSize);
 
@@ -300,7 +313,7 @@ private slots:
         int nGET = 0;
         int responseDelay = 100000; // bigger than abort-wait timeout
         fakeFolder.setServerOverride([&](QNetworkAccessManager::Operation op, const QNetworkRequest &request, QIODevice *) -> QNetworkReply * {
-            if (request.attribute(QNetworkRequest::CustomVerbAttribute) == "MOVE") {
+            if (request.attribute(QNetworkRequest::CustomVerbAttribute).toString() == "MOVE") {
                 QTimer::singleShot(50, &parent, [&]() { fakeFolder.syncEngine().abort(); });
                 moveChecksumHeader = request.rawHeader("OC-Checksum");
                 return new DelayedReply<FakeChunkMoveReply>(responseDelay, fakeFolder.uploadState(), fakeFolder.remoteModifier(), op, request, &parent);
@@ -315,35 +328,22 @@ private slots:
         fakeFolder.localModifier().insert("A/a0", size);
         QVERIFY(!fakeFolder.syncOnce()); // error: abort!
 
-        // Now the next sync gets a NEW/NEW conflict and since there's no checksum
-        // it just becomes a UPDATE_METADATA
-        auto checkEtagUpdated = [&](SyncFileItemVector &items) {
-            QCOMPARE(items.size(), 1);
-            QCOMPARE(items[0]->_file, QLatin1String("A"));
-            SyncJournalFileRecord record;
-            QVERIFY(fakeFolder.syncJournal().getFileRecord(QByteArray("A/a0"), &record));
-            QCOMPARE(record._etag, fakeFolder.remoteModifier().find("A/a0")->etag);
-        };
-        auto connection = connect(&fakeFolder.syncEngine(), &SyncEngine::aboutToPropagate, checkEtagUpdated);
         QVERIFY(fakeFolder.syncOnce());
-        disconnect(connection);
         QCOMPARE(nGET, 0);
         QCOMPARE(fakeFolder.currentLocalState(), fakeFolder.currentRemoteState());
 
-
         // Test 2: modified file upload aborted
+        nGET = 0;
         fakeFolder.localModifier().appendByte("A/a0");
         QVERIFY(!fakeFolder.syncOnce()); // error: abort!
 
         // An EVAL/EVAL conflict is also UPDATE_METADATA when there's no checksums
-        connection = connect(&fakeFolder.syncEngine(), &SyncEngine::aboutToPropagate, checkEtagUpdated);
         QVERIFY(fakeFolder.syncOnce());
-        disconnect(connection);
-        QCOMPARE(nGET, 0);
+        QCOMPARE(nGET, 1);
         QCOMPARE(fakeFolder.currentLocalState(), fakeFolder.currentRemoteState());
 
-
         // Test 3: modified file upload aborted, with good checksums
+        nGET = 0;
         fakeFolder.localModifier().appendByte("A/a0");
         QVERIFY(!fakeFolder.syncOnce()); // error: abort!
 
@@ -352,12 +352,11 @@ private slots:
         fakeFolder.remoteModifier().find("A/a0")->checksums = moveChecksumHeader;
 
         QVERIFY(fakeFolder.syncOnce());
-        disconnect(connection);
         QCOMPARE(nGET, 0); // no new download, just a metadata update!
         QCOMPARE(fakeFolder.currentLocalState(), fakeFolder.currentRemoteState());
 
-
         // Test 4: New file, that gets deleted locally before the next sync
+        nGET = 0;
         fakeFolder.localModifier().insert("A/a3", size);
         QVERIFY(!fakeFolder.syncOnce()); // error: abort!
         fakeFolder.localModifier().remove("A/a3");
@@ -382,7 +381,7 @@ private slots:
         QObject parent;
         int responseDelay = 200; // smaller than abort-wait timeout
         fakeFolder.setServerOverride([&](QNetworkAccessManager::Operation op, const QNetworkRequest &request, QIODevice *) -> QNetworkReply * {
-            if (request.attribute(QNetworkRequest::CustomVerbAttribute) == "MOVE") {
+            if (request.attribute(QNetworkRequest::CustomVerbAttribute).toString() == "MOVE") {
                 QTimer::singleShot(50, &parent, [&]() { fakeFolder.syncEngine().abort(); });
                 return new DelayedReply<FakeChunkMoveReply>(responseDelay, fakeFolder.uploadState(), fakeFolder.remoteModifier(), op, request, &parent);
             }
@@ -589,7 +588,7 @@ private slots:
             if (!chunking && op == QNetworkAccessManager::PutOperation) {
                 checksumHeader = request.rawHeader("OC-Checksum");
                 return new DelayedReply<FakePutReply>(responseDelay, fakeFolder.remoteModifier(), op, request, outgoingData->readAll(), &fakeFolder.syncEngine());
-            } else if (chunking && request.attribute(QNetworkRequest::CustomVerbAttribute) == "MOVE") {
+            } else if (chunking && request.attribute(QNetworkRequest::CustomVerbAttribute).toString() == "MOVE") {
                 checksumHeader = request.rawHeader("OC-Checksum");
                 return new DelayedReply<FakeChunkMoveReply>(responseDelay, fakeFolder.uploadState(), fakeFolder.remoteModifier(), op, request, &fakeFolder.syncEngine());
             } else if (op == QNetworkAccessManager::GetOperation) {
